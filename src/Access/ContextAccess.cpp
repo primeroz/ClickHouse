@@ -155,6 +155,7 @@ namespace
                 "formats",
                 "privileges",
                 "data_type_families",
+                "database_engines",
                 "table_engines",
                 "table_functions",
                 "aggregate_function_combinators",
@@ -201,6 +202,52 @@ namespace
         {
             res.grant(AccessType::SELECT, DatabaseCatalog::INFORMATION_SCHEMA);
             res.grant(AccessType::SELECT, DatabaseCatalog::INFORMATION_SCHEMA_UPPERCASE);
+        }
+
+        /// There is overlap between AccessType sources and table engines, so the following code avoids user granting twice.
+        static const std::vector<std::tuple<AccessFlags, std::string>> source_and_table_engines = {
+            {AccessType::FILE, "File"},
+            {AccessType::URL, "URL"},
+            {AccessType::REMOTE, "Distributed"},
+            {AccessType::MONGO, "MongoDB"},
+            {AccessType::REDIS, "Redis"},
+            {AccessType::MYSQL, "MySQL"},
+            {AccessType::POSTGRES, "PostgreSQL"},
+            {AccessType::SQLITE, "SQLite"},
+            {AccessType::ODBC, "ODBC"},
+            {AccessType::JDBC, "JDBC"},
+            {AccessType::HDFS, "HDFS"},
+            {AccessType::S3, "S3"},
+            {AccessType::HIVE, "Hive"},
+            {AccessType::AZURE, "AzureBlobStorage"}
+        };
+
+        /// Sync SOURCE and TABLE_ENGINE, so only need to check TABLE_ENGINE later.
+        if (access_control.doesTableEnginesRequireGrant())
+        {
+            for (const auto & source_and_table_engine : source_and_table_engines)
+            {
+                const auto & source = std::get<0>(source_and_table_engine);
+                if (res.isGranted(source))
+                {
+                    const auto & table_engine = std::get<1>(source_and_table_engine);
+                    res.grant(AccessType::TABLE_ENGINE, table_engine);
+                }
+            }
+        }
+        else
+        {
+            /// Add TABLE_ENGINE on * and then remove TABLE_ENGINE on particular engines.
+            res.grant(AccessType::TABLE_ENGINE);
+            for (const auto & source_and_table_engine : source_and_table_engines)
+            {
+                const auto & source = std::get<0>(source_and_table_engine);
+                if (!res.isGranted(source))
+                {
+                    const auto & table_engine = std::get<1>(source_and_table_engine);
+                    res.revoke(AccessType::TABLE_ENGINE, table_engine);
+                }
+            }
         }
 
         return res;
@@ -262,9 +309,16 @@ void ContextAccess::initialize()
             UserPtr changed_user = entity ? typeid_cast<UserPtr>(entity) : nullptr;
             std::lock_guard lock2{ptr->mutex};
             ptr->setUser(changed_user);
+            if (!ptr->user && !ptr->user_was_dropped)
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041, a)");
         });
 
     setUser(access_control->read<User>(*params.user_id));
+
+    if (!user && !user_was_dropped)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041, b)");
+
+    initialized = true;
 }
 
 
@@ -290,7 +344,7 @@ void ContextAccess::setUser(const UserPtr & user_) const
     }
 
     user_name = user->getName();
-    trace_log = &Poco::Logger::get("ContextAccess (" + user_name + ")");
+    trace_log = getLogger("ContextAccess (" + user_name + ")");
 
     std::vector<UUID> current_roles, current_roles_with_admin_option;
     if (params.use_default_roles)
@@ -327,9 +381,6 @@ void ContextAccess::setRolesInfo(const std::shared_ptr<const EnabledRolesInfo> &
     roles_info = roles_info_;
 
     enabled_row_policies = access_control->getEnabledRowPolicies(*params.user_id, roles_info->enabled_roles);
-
-    enabled_quota = access_control->getEnabledQuota(
-        *params.user_id, user_name, roles_info->enabled_roles, params.address, params.forwarded_address, params.quota_key);
 
     enabled_settings = access_control->getEnabledSettings(
         *params.user_id, user->settings, roles_info->enabled_roles, roles_info->settings_from_enabled_roles);
@@ -381,12 +432,16 @@ UserPtr ContextAccess::tryGetUser() const
 String ContextAccess::getUserName() const
 {
     std::lock_guard lock{mutex};
+    if (initialized && !user && !user_was_dropped)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041)");
     return user_name;
 }
 
 std::shared_ptr<const EnabledRolesInfo> ContextAccess::getRolesInfo() const
 {
     std::lock_guard lock{mutex};
+    if (initialized && !user && !user_was_dropped)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041)");
     if (roles_info)
         return roles_info;
     static const auto no_roles = std::make_shared<EnabledRolesInfo>();
@@ -396,6 +451,9 @@ std::shared_ptr<const EnabledRolesInfo> ContextAccess::getRolesInfo() const
 RowPolicyFilterPtr ContextAccess::getRowPolicyFilter(const String & database, const String & table_name, RowPolicyFilterType filter_type) const
 {
     std::lock_guard lock{mutex};
+
+    if (initialized && !user && !user_was_dropped)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041)");
 
     RowPolicyFilterPtr filter;
     if (enabled_row_policies)
@@ -416,25 +474,43 @@ RowPolicyFilterPtr ContextAccess::getRowPolicyFilter(const String & database, co
 std::shared_ptr<const EnabledQuota> ContextAccess::getQuota() const
 {
     std::lock_guard lock{mutex};
-    if (enabled_quota)
-        return enabled_quota;
-    static const auto unlimited_quota = EnabledQuota::getUnlimitedQuota();
-    return unlimited_quota;
+
+    if (initialized && !user && !user_was_dropped)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041)");
+
+    if (!enabled_quota)
+    {
+        if (roles_info)
+        {
+            enabled_quota = access_control->getEnabledQuota(*params.user_id,
+                                                            user_name,
+                                                            roles_info->enabled_roles,
+                                                            params.address,
+                                                            params.forwarded_address,
+                                                            params.quota_key);
+        }
+        else
+        {
+            static const auto unlimited_quota = EnabledQuota::getUnlimitedQuota();
+            return unlimited_quota;
+        }
+    }
+
+    return enabled_quota;
 }
 
 
 std::optional<QuotaUsage> ContextAccess::getQuotaUsage() const
 {
-    std::lock_guard lock{mutex};
-    if (enabled_quota)
-        return enabled_quota->getUsage();
-    return {};
+    return getQuota()->getUsage();
 }
 
 
 SettingsChanges ContextAccess::getDefaultSettings() const
 {
     std::lock_guard lock{mutex};
+    if (initialized && !user && !user_was_dropped)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041)");
     if (enabled_settings)
     {
         if (auto info = enabled_settings->getInfo())
@@ -447,6 +523,8 @@ SettingsChanges ContextAccess::getDefaultSettings() const
 std::shared_ptr<const SettingsProfilesInfo> ContextAccess::getDefaultProfileInfo() const
 {
     std::lock_guard lock{mutex};
+    if (initialized && !user && !user_was_dropped)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041)");
     if (enabled_settings)
         return enabled_settings->getInfo();
     static const auto everything_by_default = std::make_shared<SettingsProfilesInfo>(*access_control);
@@ -457,6 +535,8 @@ std::shared_ptr<const SettingsProfilesInfo> ContextAccess::getDefaultProfileInfo
 std::shared_ptr<const AccessRights> ContextAccess::getAccessRights() const
 {
     std::lock_guard lock{mutex};
+    if (initialized && !user && !user_was_dropped)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041)");
     if (access)
         return access;
     static const auto nothing_granted = std::make_shared<AccessRights>();
@@ -467,6 +547,8 @@ std::shared_ptr<const AccessRights> ContextAccess::getAccessRights() const
 std::shared_ptr<const AccessRights> ContextAccess::getAccessRightsWithImplicit() const
 {
     std::lock_guard lock{mutex};
+    if (initialized && !user && !user_was_dropped)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "ContextAccess is inconsistent (bug 55041)");
     if (access_with_implicit)
         return access_with_implicit;
     static const auto nothing_granted = std::make_shared<AccessRights>();
@@ -488,11 +570,8 @@ bool ContextAccess::checkAccessImplHelper(AccessFlags flags, const Args &... arg
     if (params.full_access)
         return true;
 
-    auto access_granted = [&]
+    auto access_granted = []
     {
-        if (trace_log)
-            LOG_TRACE(trace_log, "Access granted: {}{}", (AccessRightsElement{flags, args...}.toStringWithoutOptions()),
-                      (grant_option ? " WITH GRANT OPTION" : ""));
         return true;
     };
 
@@ -500,9 +579,6 @@ bool ContextAccess::checkAccessImplHelper(AccessFlags flags, const Args &... arg
                                                FormatStringHelper<String, FmtArgs...> fmt_string [[maybe_unused]],
                                                FmtArgs && ...fmt_args [[maybe_unused]])
     {
-        if (trace_log)
-            LOG_TRACE(trace_log, "Access denied: {}{}", (AccessRightsElement{flags, args...}.toStringWithoutOptions()),
-                      (grant_option ? " WITH GRANT OPTION" : ""));
         if constexpr (throw_if_denied)
             throw Exception(error_code, std::move(fmt_string), getUserName(), std::forward<FmtArgs>(fmt_args)...);
         return false;
@@ -540,12 +616,12 @@ bool ContextAccess::checkAccessImplHelper(AccessFlags flags, const Args &... arg
             return access_denied(ErrorCodes::ACCESS_DENIED,
                 "{}: Not enough privileges. "
                 "The required privileges have been granted, but without grant option. "
-                "To execute this query it's necessary to have grant {} WITH GRANT OPTION",
+                "To execute this query, it's necessary to have the grant {} WITH GRANT OPTION",
                 AccessRightsElement{flags, args...}.toStringWithoutOptions());
         }
 
         return access_denied(ErrorCodes::ACCESS_DENIED,
-            "{}: Not enough privileges. To execute this query it's necessary to have grant {}",
+            "{}: Not enough privileges. To execute this query, it's necessary to have the grant {}",
             AccessRightsElement{flags, args...}.toStringWithoutOptions() + (grant_option ? " WITH GRANT OPTION" : ""));
     }
 
@@ -746,11 +822,11 @@ bool ContextAccess::checkAdminOptionImplHelper(const Container & role_ids, const
                 show_error(ErrorCodes::ACCESS_DENIED,
                            "Not enough privileges. "
                            "Role {} is granted, but without ADMIN option. "
-                           "To execute this query it's necessary to have the role {} granted with ADMIN option.",
+                           "To execute this query, it's necessary to have the role {} granted with ADMIN option.",
                            backQuote(*role_name), backQuoteIfNeed(*role_name));
             else
                 show_error(ErrorCodes::ACCESS_DENIED, "Not enough privileges. "
-                           "To execute this query it's necessary to have the role {} granted with ADMIN option.",
+                           "To execute this query, it's necessary to have the role {} granted with ADMIN option.",
                            backQuoteIfNeed(*role_name));
         }
 

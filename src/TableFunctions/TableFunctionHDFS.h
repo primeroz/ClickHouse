@@ -34,12 +34,7 @@ public:
         return signature;
     }
 
-    ColumnsDescription getActualTableStructure(ContextPtr context) const override;
-
-    std::unordered_set<String> getVirtualsToCheckBeforeUsingStructureHint() const override
-    {
-        return {"_path", "_file"};
-    }
+    ColumnsDescription getActualTableStructure(ContextPtr context, bool is_insert_query) const override;
 
 private:
     StoragePtr getStorage(

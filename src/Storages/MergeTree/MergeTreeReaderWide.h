@@ -17,7 +17,8 @@ public:
     MergeTreeReaderWide(
         MergeTreeDataPartInfoForReaderPtr data_part_info_for_read_,
         NamesAndTypesList columns_,
-        const StorageMetadataPtr & metadata_snapshot_,
+        const VirtualFields & virtual_fields_,
+        const StorageSnapshotPtr & storage_snapshot_,
         UncompressedCache * uncompressed_cache_,
         MarkCache * mark_cache_,
         MarkRanges mark_ranges_,
@@ -72,6 +73,7 @@ private:
     std::unordered_map<String, ISerialization::SubstreamsCache> caches;
     std::unordered_set<std::string> prefetched_streams;
     ssize_t prefetched_from_mark = -1;
+    bool read_without_marks = false;
 };
 
 }

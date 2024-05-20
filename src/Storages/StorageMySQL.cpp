@@ -55,7 +55,7 @@ StorageMySQL::StorageMySQL(
     , on_duplicate_clause{on_duplicate_clause_}
     , mysql_settings(mysql_settings_)
     , pool(std::make_shared<mysqlxx::PoolWithFailover>(pool_))
-    , log(&Poco::Logger::get("StorageMySQL (" + table_id_.table_name + ")"))
+    , log(getLogger("StorageMySQL (" + table_id_.table_name + ")"))
 {
     StorageInMemoryMetadata storage_metadata;
 
@@ -104,6 +104,7 @@ Pipe StorageMySQL::read(
         column_names_,
         storage_snapshot->metadata->getColumns().getOrdinary(),
         IdentifierQuotingStyle::BackticksMySQL,
+        LiteralEscapingStyle::Regular,
         remote_database_name,
         remote_table_name,
         context_);

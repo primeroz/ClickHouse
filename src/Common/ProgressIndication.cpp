@@ -101,9 +101,10 @@ void ProgressIndication::writeFinalProgress()
                     << formatReadableSizeWithDecimalSuffix(progress.read_bytes * 1000000000.0 / elapsed_ns) << "/s.)";
     else
         std::cout << ". ";
+
     auto peak_memory_usage = getMemoryUsage().peak;
     if (peak_memory_usage >= 0)
-        std::cout << "\nPeak memory usage (for query) " << formatReadableSizeWithBinarySuffix(peak_memory_usage) << ".";
+        std::cout << "\nPeak memory usage: " << formatReadableSizeWithBinarySuffix(peak_memory_usage) << ".";
 }
 
 void ProgressIndication::writeProgress(WriteBufferFromFileDescriptor & message)
@@ -162,8 +163,7 @@ void ProgressIndication::writeProgress(WriteBufferFromFileDescriptor & message)
         WriteBufferFromOwnString profiling_msg_builder;
 
         /// We don't want -0. that can appear due to rounding errors.
-        if (cpu_usage <= 0)
-            cpu_usage = 0;
+        cpu_usage = std::max(cpu_usage, 0.);
 
         profiling_msg_builder << "(" << fmt::format("{:.1f}", cpu_usage) << " CPU";
 

@@ -1,4 +1,3 @@
-#include <iostream>
 #include <memory>
 #include <string>
 #include <IO/WriteBufferFromFile.h>
@@ -6,6 +5,8 @@
 #include <Storages/HDFS/ReadBufferFromHDFS.h>
 #include <base/types.h>
 #include <Common/Config/ConfigProcessor.h>
+
+#include <Poco/Util/MapConfiguration.h>
 
 using namespace DB;
 

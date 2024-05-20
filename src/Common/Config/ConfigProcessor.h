@@ -7,6 +7,8 @@
 #include <vector>
 #include <memory>
 
+#include <Common/Logger.h>
+
 #include <Poco/DOM/Document.h>
 #include <Poco/DOM/DOMParser.h>
 #include <Poco/DOM/DOMWriter.h>
@@ -43,8 +45,6 @@ public:
         bool throw_on_bad_incl = false,
         bool log_to_console = false,
         const Substitutions & substitutions = Substitutions());
-
-    ~ConfigProcessor();
 
     /// Perform config includes and substitutions and return the resulting XML-document.
     ///
@@ -125,7 +125,7 @@ private:
 
     bool throw_on_bad_incl;
 
-    Poco::Logger * log;
+    LoggerPtr log;
     Poco::AutoPtr<Poco::Channel> channel_ptr;
 
     Substitutions substitutions;
@@ -142,9 +142,14 @@ private:
     void decryptEncryptedElements(LoadedConfig & loaded_config);
 #endif
 
+    void hideRecursive(Poco::XML::Node * config_root);
+    XMLDocumentPtr hideElements(XMLDocumentPtr xml_tree);
+
     void mergeRecursive(XMLDocumentPtr config, Poco::XML::Node * config_root, const Poco::XML::Node * with_root);
 
-    void merge(XMLDocumentPtr config, XMLDocumentPtr with);
+    /// If config root node name is not 'clickhouse' and merging config's root node names doesn't match, bypasses merging and returns false.
+    /// For compatibility root node 'yandex' considered equal to 'clickhouse'.
+    bool merge(XMLDocumentPtr config, XMLDocumentPtr with);
 
     void doIncludesRecursive(
             XMLDocumentPtr config,

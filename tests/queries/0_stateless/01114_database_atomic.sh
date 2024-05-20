@@ -2,6 +2,9 @@
 # Tags: no-parallel, no-fasttest
 # Tag no-fasttest: 45 seconds running
 
+# Creation of a database with Ordinary engine emits a warning.
+CLICKHOUSE_CLIENT_SERVER_LOGS_LEVEL=fatal
+
 CURDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../shell_config.sh
 . "$CURDIR"/../shell_config.sh
@@ -12,6 +15,8 @@ DROP DATABASE IF EXISTS test_01114_1;
 DROP DATABASE IF EXISTS test_01114_2;
 DROP DATABASE IF EXISTS test_01114_3;
 "
+
+$CLICKHOUSE_CLIENT --allow_deprecated_database_ordinary=0 -q "CREATE DATABASE test_01114_1 ENGINE=Ordinary" 2>&1| grep -Fac "UNKNOWN_DATABASE_ENGINE"
 
 $CLICKHOUSE_CLIENT -q "CREATE DATABASE test_01114_1 ENGINE=Atomic"
 $CLICKHOUSE_CLIENT -q "CREATE DATABASE test_01114_2"
