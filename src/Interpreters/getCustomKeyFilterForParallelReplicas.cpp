@@ -24,12 +24,12 @@ ASTPtr getCustomKeyFilterForParallelReplica(
     size_t replicas_count,
     size_t replica_num,
     ASTPtr custom_key_ast,
-    ParallelReplicasCustomKeyFilterType filter_type,
+    ParallelReplicasMode filter_type,
     const ColumnsDescription & columns,
     const ContextPtr & context)
 {
     chassert(replicas_count > 1);
-    if (filter_type == ParallelReplicasCustomKeyFilterType::DEFAULT)
+    if (filter_type == ParallelReplicasMode::CUSTOM_KEY_SAMPLING)
     {
         // first we do modulo with replica count
         auto modulo_function = makeASTFunction("positiveModulo", custom_key_ast, std::make_shared<ASTLiteral>(replicas_count));
@@ -40,7 +40,7 @@ ASTPtr getCustomKeyFilterForParallelReplica(
         return equals_function;
     }
 
-    assert(filter_type == ParallelReplicasCustomKeyFilterType::RANGE);
+    assert(filter_type == ParallelReplicasMode::CUSTOM_KEY_SAMPLING);
 
     KeyDescription custom_key_description
         = KeyDescription::getKeyFromAST(custom_key_ast, columns, context);

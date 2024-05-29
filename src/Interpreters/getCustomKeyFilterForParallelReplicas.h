@@ -15,7 +15,7 @@ ASTPtr getCustomKeyFilterForParallelReplica(
     size_t replicas_count,
     size_t replica_num,
     ASTPtr custom_key_ast,
-    ParallelReplicasCustomKeyFilterType filter_type,
+    ParallelReplicasMode filter_type,
     const ColumnsDescription & columns,
     const ContextPtr & context);
 

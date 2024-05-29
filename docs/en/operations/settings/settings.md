@@ -1571,24 +1571,11 @@ This setting is useful for any replicated table.
 
 An arbitrary integer expression that can be used to split work between replicas for a specific table.
 The value can be any integer expression.
-A query may be processed faster if it is executed on several servers in parallel but it depends on the used [parallel_replicas_custom_key](#parallel_replicas_custom_key)
-and [parallel_replicas_custom_key_filter_type](#parallel_replicas_custom_key_filter_type).
 
 Simple expressions using primary keys are preferred.
 
 If the setting is used on a cluster that consists of a single shard with multiple replicas, those replicas will be converted into virtual shards.
 Otherwise, it will behave same as for `SAMPLE` key, it will use multiple replicas of each shard.
-
-## parallel_replicas_custom_key_filter_type {#parallel_replicas_custom_key_filter_type}
-
-How to use `parallel_replicas_custom_key` expression for splitting work between replicas.
-
-Possible values:
-
-- `default` — Use the default implementation using modulo operation on the `parallel_replicas_custom_key`.
-- `range` — Split the entire value space of the expression in the ranges. This type of filtering is useful if values of `parallel_replicas_custom_key` are uniformly spread across the entire integer space, e.g. hash values.
-
-Default value: `default`.
 
 ## use_parallel_replicas
 

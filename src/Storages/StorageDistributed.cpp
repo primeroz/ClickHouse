@@ -903,7 +903,7 @@ void StorageDistributed::read(
             additional_shard_filter_generator =
                 [my_custom_key_ast = std::move(custom_key_ast),
                  column_description = this->getInMemoryMetadataPtr()->columns,
-                 custom_key_type = settings.parallel_replicas_custom_key_filter_type.value,
+                 custom_key_type = settings.parallel_replicas_mode.value,
                  context = local_context,
                  replica_count = modified_query_info.getCluster()->getShardsInfo().front().per_replica_pools.size()](uint64_t replica_num) -> ASTPtr
             {
