@@ -49,7 +49,7 @@ class CILabels(metaclass=WithIter):
     NO_CI_CACHE = "no_ci_cache"
     # to upload all binaries from build jobs
     UPLOAD_ALL_ARTIFACTS = "upload_all"
-    CI_SET_REDUCED = "ci_set_reduced"
+    CI_SET_SYNC = "ci_set_sync"
     CI_SET_ARM = "ci_set_arm"
     CI_SET_REQUIRED = "ci_set_required"
     CI_SET_NON_REQUIRED = "ci_set_non_required"
@@ -233,13 +233,13 @@ class JobConfig:
     run_command: str = ""
     # job timeout, seconds
     timeout: Optional[int] = None
-    # sets number of batches for multi-batch job
+    # sets number of batches for a multi-batch job
     num_batches: int = 1
-    # label that enables job in CI, if set digest won't be used
+    # label that enables job in CI, if set digest isn't used
     run_by_label: str = ""
     # to run always regardless of the job digest or/and label
     run_always: bool = False
-    # if the job needs to be run on the release branch, including master (e.g. building packages, docker server).
+    # if the job needs to be run on the release branch, including master (building packages, docker server).
     # NOTE: Subsequent runs on the same branch with the similar digest are still considered skip-able.
     required_on_release_branch: bool = False
     # job is for pr workflow only
@@ -248,7 +248,7 @@ class JobConfig:
     release_only: bool = False
     # job will run if it's enabled in CI option
     run_by_ci_option: bool = False
-    # to randomly pick and run one job among jobs in the same @random_bucket. Applied in PR branches only.
+    # to randomly pick and run one job among jobs in the same @random_bucket (PR branches only).
     random_bucket: str = ""
 
 
@@ -275,6 +275,7 @@ builds_job_config = JobConfig(
             "./packages",
             "./docker/packager/packager",
             "./rust",
+            "./utils",
             # FIXME: This is a WA to rebuild the CH and recreate the Performance.tar.zst artifact
             # when there are changes in performance test scripts.
             # Due to the current design of the perf test we need to rebuild CH when the performance test changes,
@@ -552,6 +553,17 @@ class CIConfig:
     other_jobs_configs: TestConfigs
     label_configs: LabelConfigs
 
+    # Jobs that run for doc related updates
+    _DOCS_CHECK_JOBS = [JobNames.DOCS_CHECK, JobNames.STYLE_CHECK]
+
+    # Jobs that run in Merge Queue if it's enabled
+    _MQ_JOBS = [
+        JobNames.STYLE_CHECK,
+        JobNames.FAST_TEST,
+        Build.BINARY_RELEASE,
+        JobNames.UNIT_TEST,
+    ]
+
     def get_label_config(self, label_name: str) -> Optional[LabelConfig]:
         for label, config in self.label_configs.items():
             if self.normalize_string(label_name) == self.normalize_string(label):
@@ -740,6 +752,30 @@ class CIConfig:
         ):
             yield from config  # type: ignore
 
+    def get_all_wf_jobs(
+        self, is_mq: bool, is_docs_only: bool, is_master: bool
+    ) -> Iterable[str]:
+        """
+        get a list of all jobs for a workflow
+        """
+        jobs = []
+        if is_mq:
+            jobs = self._MQ_JOBS
+        elif is_docs_only:
+            jobs = self._DOCS_CHECK_JOBS
+        else:
+            for config in (
+                self.other_jobs_configs,
+                self.build_config,
+                self.builds_report_config,
+                self.test_configs,
+            ):
+                jobs += list(config.keys())
+            if is_master:
+                for job in self._MQ_JOBS:
+                    jobs.remove(job)
+        return jobs
+
     def get_builds_for_report(
         self, report_name: str, release: bool = False, backport: bool = False
     ) -> List[str]:
@@ -772,6 +808,16 @@ class CIConfig:
     @classmethod
     def is_docs_job(cls, job: str) -> bool:
         return job == JobNames.DOCS_CHECK
+
+    @staticmethod
+    def is_required(check_name: str) -> bool:
+        """Checks if a check_name is in REQUIRED_CHECKS, including batched jobs"""
+        _BATCH_REGEXP = re.compile(r"\s+\[[0-9/]+\]$")
+        if check_name in REQUIRED_CHECKS:
+            return True
+        if batch := _BATCH_REGEXP.search(check_name):
+            return check_name[: batch.start()] in REQUIRED_CHECKS
+        return False
 
     def validate(self) -> None:
         errors = []
@@ -852,8 +898,6 @@ REQUIRED_CHECKS = [
     JobNames.STATELESS_TEST_OLD_ANALYZER_S3_REPLICATED_RELEASE,
 ]
 
-BATCH_REGEXP = re.compile(r"\s+\[[0-9/]+\]$")
-
 CI_CONFIG = CIConfig(
     label_configs={
         CILabels.DO_NOT_TEST_LABEL: LabelConfig(run_jobs=[JobNames.STYLE_CHECK]),
@@ -878,22 +922,13 @@ CI_CONFIG = CIConfig(
                 JobNames.INTEGRATION_TEST_ASAN_OLD_ANALYZER,
             ]
         ),
-        CILabels.CI_SET_REDUCED: LabelConfig(
+        CILabels.CI_SET_SYNC: LabelConfig(
             run_jobs=[
-                job
-                for job in JobNames
-                if not any(
-                    nogo in job
-                    for nogo in (
-                        "asan",
-                        "tsan",
-                        "msan",
-                        "ubsan",
-                        "coverage",
-                        # skip build report jobs as not all builds will be done
-                        "build check",
-                    )
-                )
+                Build.PACKAGE_ASAN,
+                JobNames.STYLE_CHECK,
+                JobNames.BUILD_CHECK,
+                JobNames.UNIT_TEST_ASAN,
+                JobNames.STATEFUL_TEST_ASAN,
             ]
         ),
     },
@@ -1360,15 +1395,6 @@ CI_CONFIG = CIConfig(
 CI_CONFIG.validate()
 
 
-def is_required(check_name: str) -> bool:
-    """Checks if a check_name is in REQUIRED_CHECKS, including batched jobs"""
-    if check_name in REQUIRED_CHECKS:
-        return True
-    if batch := BATCH_REGEXP.search(check_name):
-        return check_name[: batch.start()] in REQUIRED_CHECKS
-    return False
-
-
 @dataclass
 class CheckDescription:
     name: str
@@ -1380,6 +1406,11 @@ class CheckDescription:
 
 
 CHECK_DESCRIPTIONS = [
+    CheckDescription(
+        "PR Check",
+        "Checks correctness of the PR's body",
+        lambda x: x == "PR Check",
+    ),
     CheckDescription(
         StatusNames.SYNC,
         "If it fails, ask a maintainer for help",

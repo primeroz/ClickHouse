@@ -168,17 +168,12 @@ class CiCache:
         if job_type == self.JobType.DOCS:
             res = job_digests[JobNames.DOCS_CHECK]
         elif job_type == self.JobType.SRCS:
-            # any build type job has the same digest - pick up Build.PACKAGE_RELEASE or Build.PACKAGE_ASAN as a failover
-            # Build.PACKAGE_RELEASE may not exist in the list if we have reduced CI pipeline
             if Build.PACKAGE_RELEASE in job_digests:
                 res = job_digests[Build.PACKAGE_RELEASE]
-            elif Build.PACKAGE_ASAN in job_digests:
-                # failover, if failover does not work - fix it!
-                res = job_digests[Build.PACKAGE_ASAN]
             else:
                 assert False, "BUG, no build job in digest' list"
         else:
-            assert False, "BUG, New JobType? - please update func"
+            assert False, "BUG, New JobType? - please update the function"
         return res
 
     def _get_record_file_name(
@@ -964,7 +959,7 @@ class CiOptions:
             jobs_to_do = list(
                 set(job for job in jobs_to_do_requested if job not in jobs_to_skip)
             )
-            # if requested job does not have params in jobs_params (it happens for "run_by_label" job)
+            # if a requested job does not have params in jobs_params (it happens for "run_by_label" job)
             #   we need to add params - otherwise it won't run as "batches" list will be empty
             for job in jobs_to_do:
                 if job not in jobs_params:
@@ -990,7 +985,7 @@ class CiOptions:
             job_param = jobs_params[job]
             if job_param["run_by_ci_option"] and job not in jobs_to_do_requested:
                 print(
-                    f"Erasing job '{job}' from list because it's not in included set, but will run only by include"
+                    f"Job [{job}] is not selected in CI settings but supposed to be run only if selected - remove"
                 )
                 jobs_to_skip.append(job)
                 jobs_to_do.remove(job)
@@ -1374,48 +1369,34 @@ def _configure_jobs(
     jobs_to_skip: List[str] = []
     digests: Dict[str, str] = {}
 
-    # FIXME: find better place for these config variables
-    DOCS_CHECK_JOBS = [JobNames.DOCS_CHECK, JobNames.STYLE_CHECK]
-    MQ_JOBS = [
-        JobNames.STYLE_CHECK,
-        JobNames.FAST_TEST,
-        Build.BINARY_RELEASE,
-        JobNames.UNIT_TEST,
-    ]
     # Must always calculate digest for these jobs for CI Cache to function (they define s3 paths where records are stored)
-    REQUIRED_DIGESTS = [JobNames.DOCS_CHECK, Build.PACKAGE_RELEASE]
-    if pr_info.has_changes_in_documentation_only():
-        print(f"WARNING: Only docs are changed - will run only [{DOCS_CHECK_JOBS}]")
-    if pr_info.is_merge_queue:
-        print(f"WARNING: It's a MQ run - will run only [{MQ_JOBS}]")
+    _REQUIRED_DIGESTS = [JobNames.DOCS_CHECK, Build.PACKAGE_RELEASE]
+    wf_jobs = CI_CONFIG.get_all_wf_jobs(
+        is_mq=pr_info.is_merge_queue,
+        is_docs_only=pr_info.has_changes_in_documentation_only(),
+        is_master=pr_info.is_master,
+    )
 
     print("::group::Job Digests")
-    for job in CI_CONFIG.job_generator(pr_info.head_ref if CI else "dummy_branch_name"):
-        if (
-            pr_info.is_merge_queue
-            and job not in MQ_JOBS
-            and job not in REQUIRED_DIGESTS
-        ):
-            # We still need digest for JobNames.DOCS_CHECK since CiCache depends on it (FIXME)
-            continue
-        if pr_info.is_master and job in MQ_JOBS:
-            # On master - skip jobs that run in MQ
-            continue
-        if (
-            pr_info.has_changes_in_documentation_only()
-            and job not in DOCS_CHECK_JOBS
-            and job not in REQUIRED_DIGESTS
-        ):
-            continue
+    for job in wf_jobs + _REQUIRED_DIGESTS:
         digest = job_digester.get_job_digest(CI_CONFIG.get_digest_config(job))
         digests[job] = digest
+        print(f"    job [{job.rjust(50)}] has digest [{digest}]")
+
+    # digests that required for CI Cache to function
+    required_digest = {}
+    for job in _REQUIRED_DIGESTS:
+        if job in digests:
+            continue
+        digest = job_digester.get_job_digest(CI_CONFIG.get_digest_config(job))
+        required_digest[job] = digest
         print(f"    job [{job.rjust(50)}] has digest [{digest}]")
     print("::endgroup::")
 
     ## b. check what we need to run
     ci_cache = None
     if not ci_options.no_ci_cache and CI:
-        ci_cache = CiCache(s3, digests).update()
+        ci_cache = CiCache(s3, {**required_digest, **digests}).update()
         ci_cache.print_status()
 
     jobs_to_wait: Dict[str, Dict[str, Any]] = {}
@@ -1427,15 +1408,10 @@ def _configure_jobs(
         batches_to_do: List[int] = []
         add_to_skip = False
 
-        if pr_info.is_merge_queue and job not in MQ_JOBS:
-            continue
         if job_config.pr_only and pr_info.is_release_branch:
             continue
-        if (
-            job_config.release_only
-            and not job_config.run_by_ci_option
-            and not pr_info.is_release_branch
-        ):
+
+        if job_config.release_only and not pr_info.is_release_branch:
             continue
 
         # fill job randomization buckets (for jobs with configured @random_bucket property)
@@ -1458,10 +1434,11 @@ def _configure_jobs(
                 job,
                 batch,
                 num_batches,
-                release_branch=pr_info.is_release_branch
-                and job_config.required_on_release_branch,
+                release_branch=(
+                    pr_info.is_release_branch and job_config.required_on_release_branch
+                ),
             ):
-                # ci cache is enabled and job is not in the cache - add
+                # ci cache is enabled, and job's batch is not in the CI cache - add to to do
                 batches_to_do.append(batch)
 
                 # check if it's pending in the cache
@@ -1469,8 +1446,10 @@ def _configure_jobs(
                     job,
                     batch,
                     num_batches,
-                    release_branch=pr_info.is_release_branch
-                    and job_config.required_on_release_branch,
+                    release_branch=(
+                        pr_info.is_release_branch
+                        and job_config.required_on_release_branch
+                    ),
                 ):
                     if job in jobs_to_wait:
                         jobs_to_wait[job]["batches"].append(batch)
@@ -1493,8 +1472,8 @@ def _configure_jobs(
             # treat job as being skipped only if it's controlled by digest
             jobs_to_skip.append(job)
 
+    # randomization bucket filtering (pick one random job from each bucket, for jobs with configured random_bucket property)
     if not pr_info.is_release_branch:
-        # randomization bucket filtering (pick one random job from each bucket, for jobs with configured random_bucket property)
         for _, jobs in randomization_buckets.items():
             jobs_to_remove_randomization = set()
             bucket_ = list(jobs)
